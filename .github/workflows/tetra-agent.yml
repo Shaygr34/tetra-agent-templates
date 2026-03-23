@@ -1,0 +1,75 @@
+name: Tetra Agent Execute
+
+on:
+  repository_dispatch:
+    types: [tetra-agent-execute]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          elif [ -f package.json ]; then
+            npm install
+          fi
+
+      - name: Write action items to file
+        run: |
+          mkdir -p specs/action-items
+          echo '${{ toJSON(github.event.client_payload.action_items) }}' > specs/action-items/${{ github.event.client_payload.entry_id }}.json
+
+      - name: Run Claude Code Agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          prompt: |
+            ${{ github.event.client_payload.prompt }}
+
+            Action items are in: specs/action-items/${{ github.event.client_payload.entry_id }}.json
+
+            Rules:
+            1. Read CLAUDE.md for project instructions.
+            2. Read AGENT_LOG.md for previous agent context.
+            3. Create branch: agent/${{ github.event.client_payload.entry_id }}
+            4. Implement changes.
+            5. Append to AGENT_LOG.md.
+            6. Commit: agent(type): description
+            7. Push and open PR against main.
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: >-
+            --max-turns 25
+            --model claude-sonnet-4-6
+            --dangerously-skip-permissions
+          show_full_output: "true"
+
+      - name: Report completion
+        if: always()
+        run: |
+          curl -s -X POST "${{ secrets.N8N_WEBHOOK_URL }}/agent-complete" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"entry_id\": \"${{ github.event.client_payload.entry_id }}\",
+              \"project_id\": \"${{ github.event.client_payload.project_id }}\",
+              \"status\": \"${{ job.status }}\",
+              \"run_url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
+            }" || true

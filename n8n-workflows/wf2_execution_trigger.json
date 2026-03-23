@@ -1,0 +1,179 @@
+{
+  "name": "Tetra WF2 — Code Execution Trigger",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "trigger-execution",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "wf2-webhook",
+      "name": "Execution Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/action_items?entry_id=eq.{{ $json.body.entry_id }}&status=eq.pending&select=*",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "wf2-fetch-items",
+      "name": "Fetch Action Items",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "SUPABASE_CRED_ID",
+          "name": "Supabase Service"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/projects?id=eq.{{ $('Execution Trigger').item.json.body.project_id }}&select=*",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "wf2-fetch-project",
+      "name": "Fetch Project",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 500],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "SUPABASE_CRED_ID",
+          "name": "Supabase Service"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $('Fetch Action Items').first().json;\nconst project = $('Fetch Project').first().json;\nconst entryId = $('Execution Trigger').first().json.body.entry_id;\nconst projectId = $('Execution Trigger').first().json.body.project_id;\n\n// items might be an array or a single object\nconst actionItems = Array.isArray(items) ? items : [items];\n\nconst itemList = actionItems.map((item, i) => \n  `${i+1}. [${item.priority}] ${item.title}\\n   ${item.description}`\n).join('\\n\\n');\n\nconst prompt = `You have the following action items to implement:\n\n${itemList}\n\nRead CLAUDE.md for build instructions and conventions.\nRead AGENT_LOG.md for context on previous agent actions.\nRead STATE.md for current project status.\n\nFor each action item:\n1. Create a feature branch: agent/${entryId.substring(0, 8)}\n2. Implement the changes\n3. Append to AGENT_LOG.md with: timestamp, entry ID, what you changed, files modified\n4. Commit with: agent(type): description\n5. Push and open a PR against main with structured body`;\n\nconst githubRepo = Array.isArray(project) ? project[0].github_repo : project.github_repo;\n\nreturn [{\n  json: {\n    prompt,\n    entryId,\n    projectId,\n    githubRepo,\n    actionItems\n  }\n}];"
+      },
+      "id": "wf2-build-prompt",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.github.com/repos/{{ $json.githubRepo }}/dispatches",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ event_type: 'tetra-agent-execute', client_payload: { entry_id: $json.entryId, project_id: $json.projectId, action_items: $json.actionItems, prompt: $json.prompt } }) }}",
+        "options": {}
+      },
+      "id": "wf2-dispatch",
+      "name": "Trigger GitHub Actions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [940, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "GITHUB_CRED_ID",
+          "name": "GitHub PAT"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/entries?id=eq.{{ $('Build Prompt').item.json.entryId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{ \"status\": \"executing\" }",
+        "options": {}
+      },
+      "id": "wf2-update-status",
+      "name": "Update Entry Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1160, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "SUPABASE_CRED_ID",
+          "name": "Supabase Service"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $env.TELEGRAM_CHAT_ID, text: '🚀 Agent executing for ' + $('Build Prompt').item.json.githubRepo + '\\n\\n' + $('Build Prompt').item.json.actionItems.length + ' action item(s) dispatched to GitHub Actions.', parse_mode: 'HTML' }) }}"
+      },
+      "id": "wf2-notify",
+      "name": "Notify Shay",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1380, 300]
+    }
+  ],
+  "connections": {
+    "Execution Trigger": {
+      "main": [
+        [
+          { "node": "Fetch Action Items", "type": "main", "index": 0 },
+          { "node": "Fetch Project", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Fetch Action Items": {
+      "main": [
+        [
+          { "node": "Build Prompt", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Fetch Project": {
+      "main": [
+        [
+          { "node": "Build Prompt", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          { "node": "Trigger GitHub Actions", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Trigger GitHub Actions": {
+      "main": [
+        [
+          { "node": "Update Entry Status", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Update Entry Status": {
+      "main": [
+        [
+          { "node": "Notify Shay", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "tetra-agent" }
+  ]
+}

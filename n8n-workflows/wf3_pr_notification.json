@@ -1,0 +1,146 @@
+{
+  "name": "Tetra WF3 — PR Notification",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "github-pr",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "wf3-webhook",
+      "name": "GitHub PR Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "is-opened",
+              "leftValue": "={{ $json.body.action }}",
+              "rightValue": "opened",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "is-agent-branch",
+              "leftValue": "={{ $json.body.pull_request.head.ref }}",
+              "rightValue": "agent/",
+              "operator": {
+                "type": "string",
+                "operation": "startsWith"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf3-filter",
+      "name": "Is Agent PR?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const pr = $input.first().json.body.pull_request;\nconst repo = $input.first().json.body.repository;\n\nreturn [{\n  json: {\n    prNumber: pr.number,\n    prUrl: pr.html_url,\n    prTitle: pr.title,\n    prBody: pr.body || '(no description)',\n    branch: pr.head.ref,\n    additions: pr.additions,\n    deletions: pr.deletions,\n    changedFiles: pr.changed_files,\n    repoFullName: repo.full_name,\n    repoName: repo.name,\n    // Build callback_data with underscore-separated repo (n8n parses it back)\n    callbackRepo: repo.full_name.replace('/', '_')\n  }\n}];"
+      },
+      "id": "wf3-extract",
+      "name": "Extract PR Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $env.TELEGRAM_CHAT_ID, text: '🔧 <b>Agent PR #' + $json.prNumber + '</b>\\n\\n📦 <b>Project:</b> ' + $json.repoName + '\\n🌿 <b>Branch:</b> ' + $json.branch + '\\n\\n<b>' + $json.prTitle + '</b>\\n\\n📊 ' + $json.changedFiles + ' files changed, +' + $json.additions + ' -' + $json.deletions, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '✅ Merge', callback_data: 'merge_' + $json.prNumber + '_' + $json.callbackRepo }, { text: '❌ Reject', callback_data: 'reject_' + $json.prNumber + '_' + $json.callbackRepo }], [{ text: '👀 Review in GitHub', url: $json.prUrl }]] } }) }}"
+      },
+      "id": "wf3-telegram",
+      "name": "Send Telegram Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 200]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/entries?github_pr_number=is.null&status=eq.executing&order=created_at.desc&limit=1",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ status: 'pr_open', github_pr_url: $('Extract PR Data').item.json.prUrl, github_pr_number: $('Extract PR Data').item.json.prNumber }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false
+            }
+          }
+        }
+      },
+      "id": "wf3-update-supabase",
+      "name": "Update Entry Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "SUPABASE_CRED_ID",
+          "name": "Supabase Service"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "GitHub PR Webhook": {
+      "main": [
+        [
+          { "node": "Is Agent PR?", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Is Agent PR?": {
+      "main": [
+        [
+          { "node": "Extract PR Data", "type": "main", "index": 0 }
+        ],
+        []
+      ]
+    },
+    "Extract PR Data": {
+      "main": [
+        [
+          { "node": "Send Telegram Notification", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Send Telegram Notification": {
+      "main": [
+        [
+          { "node": "Update Entry Status", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "tetra-agent" }
+  ]
+}

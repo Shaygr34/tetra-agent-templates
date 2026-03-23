@@ -1,0 +1,258 @@
+{
+  "name": "Tetra WF1 — New Entry Processor",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "new-entry",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "wf1-webhook",
+      "name": "New Entry Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Supabase webhook payload has the new row in body.record\nconst record = $input.first().json.body.record || $input.first().json.body;\nreturn [{ json: record }];"
+      },
+      "id": "wf1-extract",
+      "name": "Extract Entry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/projects?id=eq.{{ $json.project_id }}&select=*",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "wf1-fetch-project",
+      "name": "Fetch Project",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "SUPABASE_CRED_ID",
+          "name": "Supabase Service"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const entry = $('Extract Entry').first().json;\nconst projectArr = $('Fetch Project').first().json;\nconst project = Array.isArray(projectArr) ? projectArr[0] : projectArr;\n\nconst systemPrompt = `You are the Tetra Action Item Generator. You transform client voice feedback into structured, implementable action items for the Claude Code agent.\n\nContext:\n- Project: ${project.name}\n- Tech stack: Next.js, Sanity CMS, Tailwind CSS, Vercel\n- Site URL: ${project.site_url || 'N/A'}\n- Client language: ${project.metadata?.language || 'en'}\n\nTransform the client feedback into action items. Each must be:\n1. Specific enough for Claude Code to implement without questions\n2. Scoped to a single change\n3. Categorized: code, content, design, config, investigation\n4. Prioritized: critical, high, medium, low\n\nIf ambiguous, create an \"investigation\" type item.\n\nRespond ONLY with a JSON array, no markdown, no explanation:\n[{ \"title\": \"...\", \"description\": \"...\", \"priority\": \"...\", \"type\": \"...\" }]`;\n\nreturn [{\n  json: {\n    systemPrompt,\n    transcript: entry.raw_transcript,\n    entryId: entry.id,\n    projectId: entry.project_id,\n    intent: entry.intent,\n    githubRepo: project.github_repo\n  }\n}];"
+      },
+      "id": "wf1-build-prompt",
+      "name": "Build Claude Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 4096, system: $json.systemPrompt, messages: [{ role: 'user', content: 'Client feedback (' + $json.intent + '):\\n\\n' + $json.transcript }] }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "wf1-claude-api",
+      "name": "Claude API — Generate Items",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ANTHROPIC_CRED_ID",
+          "name": "Anthropic API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst entryId = $('Build Claude Prompt').first().json.entryId;\nconst projectId = $('Build Claude Prompt').first().json.projectId;\n\n// Extract text from Claude response\nlet text = '';\nif (response.content && Array.isArray(response.content)) {\n  text = response.content.map(c => c.text || '').join('');\n} else if (typeof response === 'string') {\n  text = response;\n}\n\n// Clean and parse JSON\ntext = text.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n\nlet actionItems;\ntry {\n  actionItems = JSON.parse(text);\n} catch(e) {\n  // Try to extract JSON array from text\n  const match = text.match(/\\[[\\s\\S]*\\]/);\n  if (match) {\n    actionItems = JSON.parse(match[0]);\n  } else {\n    actionItems = [{ title: 'Review client feedback', description: 'Could not auto-parse: ' + text.substring(0, 500), priority: 'high', type: 'investigation' }];\n  }\n}\n\nreturn [{\n  json: {\n    actionItems,\n    entryId,\n    projectId,\n    count: actionItems.length\n  }\n}];"
+      },
+      "id": "wf1-parse",
+      "name": "Parse Action Items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const { actionItems, entryId, projectId } = $input.first().json;\n\n// Build batch insert for Supabase\nconst rows = actionItems.map(item => ({\n  entry_id: entryId,\n  project_id: projectId,\n  title: item.title,\n  description: item.description,\n  priority: item.priority || 'medium',\n  type: item.type || 'code',\n  status: 'pending'\n}));\n\nreturn [{ json: { rows, entryId, projectId } }];"
+      },
+      "id": "wf1-prepare-insert",
+      "name": "Prepare Insert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/action_items",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Prefer", "value": "return=representation" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.rows) }}",
+        "options": {}
+      },
+      "id": "wf1-insert-items",
+      "name": "Insert Action Items",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1780, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "SUPABASE_CRED_ID",
+          "name": "Supabase Service"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/entries?id=eq.{{ $('Prepare Insert').item.json.entryId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{ \"status\": \"action_items_generated\" }",
+        "options": {}
+      },
+      "id": "wf1-update-entry",
+      "name": "Update Entry Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2000, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "SUPABASE_CRED_ID",
+          "name": "Supabase Service"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "wf1-placeholder-trigger-wf2",
+      "name": "Trigger WF2 (Internal)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2000, 400],
+      "disabled": true,
+      "notesInFlow": true,
+      "notes": "MANUAL STEP: After import, replace this with an n8n 'Execute Workflow' node pointing to WF2, passing entry_id and project_id. Or use an HTTP Request to POST to your own /webhook/trigger-execution endpoint."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $env.TELEGRAM_CHAT_ID, text: '🎯 <b>' + $('Parse Action Items').item.json.count + ' action item(s)</b> generated\\n\\nProject: ' + $('Build Claude Prompt').item.json.githubRepo + '\\nFrom: ' + $('Build Claude Prompt').item.json.intent + ' feedback\\n\\nExecution triggered.', parse_mode: 'HTML' }) }}"
+      },
+      "id": "wf1-notify",
+      "name": "Notify Shay",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2220, 300]
+    }
+  ],
+  "connections": {
+    "New Entry Webhook": {
+      "main": [
+        [
+          { "node": "Extract Entry", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Extract Entry": {
+      "main": [
+        [
+          { "node": "Fetch Project", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Fetch Project": {
+      "main": [
+        [
+          { "node": "Build Claude Prompt", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Build Claude Prompt": {
+      "main": [
+        [
+          { "node": "Claude API — Generate Items", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Claude API — Generate Items": {
+      "main": [
+        [
+          { "node": "Parse Action Items", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Parse Action Items": {
+      "main": [
+        [
+          { "node": "Prepare Insert", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Prepare Insert": {
+      "main": [
+        [
+          { "node": "Insert Action Items", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Insert Action Items": {
+      "main": [
+        [
+          { "node": "Update Entry Status", "type": "main", "index": 0 },
+          { "node": "Notify Shay", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "tetra-agent" }
+  ]
+}

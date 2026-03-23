@@ -1,0 +1,114 @@
+{
+  "name": "Tetra WF5 — Agent Complete",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "agent-complete",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "wf5-webhook",
+      "name": "Agent Complete Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "is-failure",
+              "leftValue": "={{ $json.body.status }}",
+              "rightValue": "failure",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf5-check-status",
+      "name": "Failed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $env.TELEGRAM_CHAT_ID, text: '⚠️ <b>Agent Execution Failed</b>\\n\\nEntry: ' + $('Agent Complete Webhook').first().json.body.entry_id + '\\n\\n🔗 <a href=\"' + $('Agent Complete Webhook').first().json.body.run_url + '\">View logs</a>', parse_mode: 'HTML' }) }}"
+      },
+      "id": "wf5-notify-failure",
+      "name": "Notify Failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 200]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/entries?id=eq.{{ $('Agent Complete Webhook').first().json.body.entry_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{ \"status\": \"error\", \"error_message\": \"GitHub Actions run failed\" }",
+        "options": {}
+      },
+      "id": "wf5-update-error",
+      "name": "Mark Entry Error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "SUPABASE_CRED_ID",
+          "name": "Supabase Service"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Agent Complete Webhook": {
+      "main": [
+        [
+          { "node": "Failed?", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Failed?": {
+      "main": [
+        [
+          { "node": "Notify Failure", "type": "main", "index": 0 }
+        ],
+        []
+      ]
+    },
+    "Notify Failure": {
+      "main": [
+        [
+          { "node": "Mark Entry Error", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "tetra-agent" }
+  ]
+}

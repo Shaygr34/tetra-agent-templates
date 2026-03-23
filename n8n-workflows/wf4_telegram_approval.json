@@ -1,0 +1,306 @@
+{
+  "name": "Tetra WF4 — Telegram Approval",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "telegram",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wf4-webhook",
+      "name": "Telegram Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-callback",
+              "leftValue": "={{ $json.body.callback_query }}",
+              "rightValue": "",
+              "operator": {
+                "type": "object",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf4-if-callback",
+      "name": "Has Callback?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const callback = $input.first().json.body.callback_query;\nconst data = callback.data; // e.g. \"merge_1_Shaygr34/tetra-test-project\"\nconst callbackId = callback.id;\nconst parts = data.split('_');\nconst action = parts[0]; // merge or reject\nconst prNumber = parts[1];\nconst repo = parts.slice(2).join('_').replace(/_/g, '/'); // handle org/repo\n\nreturn [{\n  json: {\n    action,\n    prNumber,\n    repo,\n    callbackId,\n    chatId: callback.message.chat.id,\n    messageId: callback.message.message_id\n  }\n}];"
+      },
+      "id": "wf4-parse",
+      "name": "Parse Callback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "is-merge",
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "merge",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf4-switch",
+      "name": "Merge or Reject?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://api.github.com/repos/{{ $json.repo }}/pulls/{{ $json.prNumber }}/merge",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{ \"merge_method\": \"squash\" }",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "id": "wf4-merge-pr",
+      "name": "Merge PR",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "GITHUB_CRED_ID",
+          "name": "GitHub PAT"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.github.com/repos/{{ $('Parse Callback').item.json.repo }}/issues/{{ $('Parse Callback').item.json.prNumber }}/comments",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{ \"body\": \"❌ Rejected by Shay via Telegram. Closing.\" }",
+        "options": {}
+      },
+      "id": "wf4-comment-pr",
+      "name": "Comment on PR",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 420],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "GITHUB_CRED_ID",
+          "name": "GitHub PAT"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.github.com/repos/{{ $('Parse Callback').item.json.repo }}/pulls/{{ $('Parse Callback').item.json.prNumber }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{ \"state\": \"closed\" }",
+        "options": {}
+      },
+      "id": "wf4-close-pr",
+      "name": "Close PR",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 420],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "GITHUB_CRED_ID",
+          "name": "GitHub PAT"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/answerCallbackQuery",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ callback_query_id: $('Parse Callback').item.json.callbackId, text: '✅ Merged and deploying!' }) }}"
+      },
+      "id": "wf4-ack-merge",
+      "name": "Ack Merge",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 120]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Parse Callback').item.json.chatId, message_id: $('Parse Callback').item.json.messageId, text: '✅ MERGED — PR #' + $('Parse Callback').item.json.prNumber + ' merged and deploying.', parse_mode: 'HTML' }) }}"
+      },
+      "id": "wf4-edit-merge",
+      "name": "Update Message (Merged)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1560, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/answerCallbackQuery",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ callback_query_id: $('Parse Callback').item.json.callbackId, text: '❌ Rejected' }) }}"
+      },
+      "id": "wf4-ack-reject",
+      "name": "Ack Reject",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1560, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/editMessageText",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('Parse Callback').item.json.chatId, message_id: $('Parse Callback').item.json.messageId, text: '❌ REJECTED — PR #' + $('Parse Callback').item.json.prNumber + ' closed.', parse_mode: 'HTML' }) }}"
+      },
+      "id": "wf4-edit-reject",
+      "name": "Update Message (Rejected)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1780, 420]
+    },
+    {
+      "parameters": {
+        "respondWith": "noData",
+        "options": {}
+      },
+      "id": "wf4-respond",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [460, 500]
+    }
+  ],
+  "connections": {
+    "Telegram Webhook": {
+      "main": [
+        [
+          { "node": "Has Callback?", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Has Callback?": {
+      "main": [
+        [
+          { "node": "Parse Callback", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "Respond OK", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Parse Callback": {
+      "main": [
+        [
+          { "node": "Merge or Reject?", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Merge or Reject?": {
+      "main": [
+        [
+          { "node": "Merge PR", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "Comment on PR", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Merge PR": {
+      "main": [
+        [
+          { "node": "Ack Merge", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Ack Merge": {
+      "main": [
+        [
+          { "node": "Update Message (Merged)", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Comment on PR": {
+      "main": [
+        [
+          { "node": "Close PR", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Close PR": {
+      "main": [
+        [
+          { "node": "Ack Reject", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Ack Reject": {
+      "main": [
+        [
+          { "node": "Update Message (Rejected)", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "tetra-agent" }
+  ]
+}
