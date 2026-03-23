@@ -35,9 +35,16 @@ jobs:
           fi
 
       - name: Write action items to file
-        run: |
-          mkdir -p specs/action-items
-          echo '${{ toJSON(github.event.client_payload.action_items) }}' > specs/action-items/${{ github.event.client_payload.entry_id }}.json
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            fs.mkdirSync('specs/action-items', { recursive: true });
+            const items = context.payload.client_payload.action_items;
+            const data = typeof items === 'string' ? items : JSON.stringify(items, null, 2);
+            const entryId = context.payload.client_payload.entry_id;
+            fs.writeFileSync(`specs/action-items/${entryId}.json`, data);
+            console.log(`Wrote action items for ${entryId}`)
 
       - name: Run Claude Code Agent
         uses: anthropics/claude-code-action@v1
